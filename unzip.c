@@ -14,6 +14,11 @@
 
    This program is distributed under the terms of the same license as zlib.
    See the accompanying LICENSE file for the full text of the license.
+
+   Mar 8th, 2016 - Lucio Cosmo
+   Fixed support for 64bit builds for archives with "PKWARE" password.
+   Changed long, unsigned long, unsigned to unsigned int in
+   access functions to crctables and pkeys
 */
 
 #include <stdio.h>
@@ -160,8 +165,8 @@ typedef struct
                                         /* structure about the current file if we are decompressing it */
     int isZip64;                        /* is the current file zip64 */
 #ifndef NOUNCRYPT
-    unsigned long keys[3];              /* keys defining the pseudo-random sequence */
-    const unsigned long* pcrc_32_tab;
+    unsigned int keys[3];               /* keys defining the pseudo-random sequence */
+    const unsigned int* pcrc_32_tab;
 #endif
 } unz64_s;
 
@@ -394,7 +399,9 @@ local unzFile unzOpenInternal(const void *path, zlib_filefunc64_32_def* pzlib_fi
     unz64_s us;
     unz64_s *s;
     ZPOS64_T central_pos;
+    ZPOS64_T central_pos64;
     uLong uL;
+    ZPOS64_T uL64;
     voidpf filestream = NULL;
     ZPOS64_T number_entry_CD;
     int err = UNZ_OK;
@@ -419,8 +426,7 @@ local unzFile unzOpenInternal(const void *path, zlib_filefunc64_32_def* pzlib_fi
     us.filestream_with_CD = us.filestream;
     us.isZip64 = 0;
 
-    /* Use unz64local_SearchCentralDir first. Only based on the result
-       is it necessary to locate the unz64local_SearchCentralDir64 */
+    /* Search for end of central directory header */
     central_pos = unz64local_SearchCentralDir(&us.z_filefunc, us.filestream);
     if (central_pos)
     {
@@ -460,15 +466,13 @@ local unzFile unzOpenInternal(const void *path, zlib_filefunc64_32_def* pzlib_fi
         if (unz64local_getShort(&us.z_filefunc, us.filestream, &us.gi.size_comment) != UNZ_OK)
             err = UNZ_ERRNO;
 
-        if ((err == UNZ_OK) &&
-            ((us.gi.number_entry == 0xffff) || (us.size_central_dir == 0xffff) || (us.offset_central_dir == 0xffffffff)))
+        if (err == UNZ_OK)
         {
-            /* Format should be Zip64, as the central directory or file size is too large */
-            central_pos = unz64local_SearchCentralDir64(&us.z_filefunc, us.filestream, central_pos);
-            if (central_pos)
+            /* Search for Zip64 end of central directory header */
+            central_pos64 = unz64local_SearchCentralDir64(&us.z_filefunc, us.filestream, central_pos);
+            if (central_pos64)
             {
-                ZPOS64_T uL64;
-
+                central_pos = central_pos64;
                 us.isZip64 = 1;
 
                 if (ZSEEK64(us.z_filefunc, us.filestream, central_pos, ZLIB_FILEFUNC_SEEK_SET) != 0)
@@ -507,7 +511,7 @@ local unzFile unzOpenInternal(const void *path, zlib_filefunc64_32_def* pzlib_fi
                 if (unz64local_getLong64(&us.z_filefunc, us.filestream, &us.offset_central_dir) != UNZ_OK)
                     err = UNZ_ERRNO;
             }
-            else
+            else if ((us.gi.number_entry == 0xffff) || (us.size_central_dir == 0xffff) || (us.offset_central_dir == 0xffffffff))
                 err = UNZ_BADZIPFILE;
         }
     }
@@ -1233,9 +1237,10 @@ extern int ZEXPORT unzOpenCurrentFile3(unzFile file, int* method, int* level, in
     pfile_in_zip_read_info->stream.avail_in = (uInt)0;
 
     s->pfile_in_zip_read = pfile_in_zip_read_info;
-    s->pcrc_32_tab = NULL;
 
 #ifndef NOUNCRYPT
+    s->pcrc_32_tab = NULL;
+
     if ((password != NULL) && ((s->cur_file_info.flag & 1) != 0))
     {
         if (ZSEEK64(s->z_filefunc, s->filestream,
@@ -1272,7 +1277,7 @@ extern int ZEXPORT unzOpenCurrentFile3(unzFile file, int* method, int* level, in
 #endif
         {
             int i;
-            s->pcrc_32_tab = (const unsigned long*)get_crc_table();
+            s->pcrc_32_tab = (const unsigned int*)get_crc_table();
             init_keys(password, s->keys, s->pcrc_32_tab);
 
             if (ZREAD64(s->z_filefunc, s->filestream, source, 12) < 12)
@@ -1455,19 +1460,19 @@ extern int ZEXPORT unzReadCurrentFile(unzFile file, voidp buf, unsigned len)
             s->pfile_in_zip_read->bstream.avail_in       = s->pfile_in_zip_read->stream.avail_in;
             s->pfile_in_zip_read->bstream.total_in_lo32  = (uInt)s->pfile_in_zip_read->stream.total_in;
             s->pfile_in_zip_read->bstream.total_in_hi32  = s->pfile_in_zip_read->stream.total_in >> 32;
-            
+
             s->pfile_in_zip_read->bstream.next_out       = (char*)s->pfile_in_zip_read->stream.next_out;
             s->pfile_in_zip_read->bstream.avail_out      = s->pfile_in_zip_read->stream.avail_out;
             s->pfile_in_zip_read->bstream.total_out_lo32 = (uInt)s->pfile_in_zip_read->stream.total_out;
             s->pfile_in_zip_read->bstream.total_out_hi32 = s->pfile_in_zip_read->stream.total_out >> 32;
 
-            total_out_before = s->pfile_in_zip_read->bstream.total_out_lo32 + 
+            total_out_before = s->pfile_in_zip_read->bstream.total_out_lo32 +
                 (((uLong)s->pfile_in_zip_read->bstream.total_out_hi32) << 32);
             buf_before = (const Bytef *)s->pfile_in_zip_read->bstream.next_out;
 
             err = BZ2_bzDecompress(&s->pfile_in_zip_read->bstream);
 
-            total_out_after = s->pfile_in_zip_read->bstream.total_out_lo32 + 
+            total_out_after = s->pfile_in_zip_read->bstream.total_out_lo32 +
                 (((uLong)s->pfile_in_zip_read->bstream.total_out_hi32) << 32);
 
             out_bytes = total_out_after-total_out_before;
